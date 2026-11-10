@@ -1,5 +1,5 @@
-// pcp_cli: runs the polycube pipeline (validate -> tetrahedralize -> l1 polycube -> structure)
-// on one closed triangle mesh and writes all results into an output directory.
+// pcp_cli: runs the polycube pipeline (validate -> tetrahedralize -> l1 polycube -> structure
+// -> height simplification) on one closed triangle mesh and writes all results into an output directory.
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -14,16 +14,16 @@ int main(int argc, char** argv) {
   CLI::App app{"Polycube construction pipeline (Huang et al. 2014 l1 polycube)"};
   app.set_version_flag("--version", pcp::version());
 
-  std::string input, output, until = "structure", resume, params_file, feature_edges,
+  std::string input, output, until = "simplify", resume, params_file, feature_edges,
                              linear_solver;
-  bool quiet = false, verbose = false, no_rotation = false;
+  bool quiet = false, verbose = false, no_rotation = false, no_simplify = false;
   std::optional<double> beta, alpha0, alpha_factor, eps0, eps_factor, threshold, omega,
-      tet_size_factor, tet_max_volume, tet_ratio;
+      tet_size_factor, tet_max_volume, tet_ratio, max_stretch;
   std::optional<int> max_stages;
 
   app.add_option("input", input, "Input closed triangle mesh (.off)")->required();
   app.add_option("-o,--output", output, "Output directory")->required();
-  app.add_option("--until", until, "Last stage to run: validate | tet | l1 | structure")
+  app.add_option("--until", until, "Last stage to run: validate | tet | l1 | structure | simplify")
       ->capture_default_str();
   app.add_option("--resume-from", resume, "Start from a saved tet mesh (.tmsh) instead of tetrahedralizing");
   app.add_option("--params", params_file, "JSON parameter file (command-line options override it)");
@@ -41,6 +41,8 @@ int main(int argc, char** argv) {
   app.add_option("--tet-size-factor", tet_size_factor, "Tet edge length / average surface edge length");
   app.add_option("--tet-max-volume", tet_max_volume, "Maximum tet volume (overrides the size factor)");
   app.add_option("--tet-ratio", tet_ratio, "TetGen radius-edge ratio bound");
+  app.add_flag("--no-simplify", no_simplify, "Skip the height simplification (Chen 2019)");
+  app.add_option("--max-stretch", max_stretch, "Height simplification: maximum chain stretch ratio (>= 1)");
   auto* q = app.add_flag("-q,--quiet", quiet, "Only print errors");
   app.add_flag("-v,--verbose", verbose, "Print detailed progress")->excludes(q);
 
@@ -65,6 +67,8 @@ int main(int argc, char** argv) {
     if (tet_size_factor) params.tet.size_factor = *tet_size_factor;
     if (tet_max_volume) params.tet.max_volume = *tet_max_volume;
     if (tet_ratio) params.tet.radius_edge_ratio = *tet_ratio;
+    if (no_simplify) params.simplify.enabled = false;
+    if (max_stretch) params.simplify.update_from_json({{"max_stretch", *max_stretch}});  // validates
 
     pcp::PipelineOptions opt;
     opt.input = input;

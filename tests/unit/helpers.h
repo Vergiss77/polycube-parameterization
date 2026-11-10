@@ -1,7 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <array>
 #include <map>
+#include <set>
+#include <vector>
 #include <string>
 
 #include "pcp/core/constants.h"
@@ -129,6 +132,59 @@ inline pcp::SurfaceMesh make_icosphere(int levels) {
   for (size_t i = 0; i < v.size(); ++i) s.V.row(static_cast<pcp::Index>(i)) = v[i];
   s.F.resize(static_cast<pcp::Index>(f.size()), 3);
   for (size_t i = 0; i < f.size(); ++i) s.F.row(static_cast<pcp::Index>(i)) = f[i];
+  return s;
+}
+
+// Closed surface of a union of unit voxels (integer coordinates), each voxel face split into
+// n x n quads (2 triangles each), outward orientation, welded vertices. The voxels must not
+// touch along edges or vertices only (the result would not be manifold).
+inline pcp::SurfaceMesh make_voxels(const std::vector<std::array<int, 3>>& voxels, int n) {
+  std::set<std::array<int, 3>> occ(voxels.begin(), voxels.end());
+  std::map<std::array<int, 3>, int> id;
+  std::vector<Eigen::Vector3d> verts;
+  std::vector<Eigen::Vector3i> tris;
+  auto vid = [&](std::array<int, 3> g) {
+    auto it = id.find(g);
+    if (it != id.end()) return it->second;
+    int i = static_cast<int>(verts.size());
+    id[g] = i;
+    verts.emplace_back(double(g[0]) / n, double(g[1]) / n, double(g[2]) / n);
+    return i;
+  };
+  for (const auto& v : voxels) {
+    for (int a = 0; a < 3; ++a) {
+      for (int sgn : {-1, 1}) {
+        std::array<int, 3> nb = v;
+        nb[a] += sgn;
+        if (occ.count(nb)) continue;
+        const int b = (a + 1) % 3, c = (a + 2) % 3;
+        for (int i = 0; i < n; ++i)
+          for (int j = 0; j < n; ++j) {
+            std::array<int, 4> q;
+            const int du[4] = {0, 1, 1, 0}, dv[4] = {0, 0, 1, 1};
+            for (int k = 0; k < 4; ++k) {
+              std::array<int, 3> g{};
+              g[a] = (v[a] + (sgn > 0 ? 1 : 0)) * n;
+              g[b] = v[b] * n + i + du[k];
+              g[c] = v[c] * n + j + dv[k];
+              q[k] = vid(g);
+            }
+            if (sgn > 0) {  // e_b x e_c = e_a: counter-clockwise seen from outside
+              tris.emplace_back(q[0], q[1], q[2]);
+              tris.emplace_back(q[0], q[2], q[3]);
+            } else {
+              tris.emplace_back(q[0], q[2], q[1]);
+              tris.emplace_back(q[0], q[3], q[2]);
+            }
+          }
+      }
+    }
+  }
+  pcp::SurfaceMesh s;
+  s.V.resize(static_cast<pcp::Index>(verts.size()), 3);
+  for (size_t i = 0; i < verts.size(); ++i) s.V.row(static_cast<pcp::Index>(i)) = verts[i];
+  s.F.resize(static_cast<pcp::Index>(tris.size()), 3);
+  for (size_t i = 0; i < tris.size(); ++i) s.F.row(static_cast<pcp::Index>(i)) = tris[i];
   return s;
 }
 

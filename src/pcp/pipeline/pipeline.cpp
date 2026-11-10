@@ -28,7 +28,8 @@ Stage parse_stage(const std::string& s) {
   if (s == "tet") return Stage::Tet;
   if (s == "l1") return Stage::L1;
   if (s == "structure") return Stage::Structure;
-  throw Error("unknown stage '" + s + "' (expected validate, tet, l1 or structure)");
+  if (s == "simplify") return Stage::Simplify;
+  throw Error("unknown stage '" + s + "' (expected validate, tet, l1, structure or simplify)");
 }
 
 const char* stage_name(Stage s) {
@@ -36,7 +37,8 @@ const char* stage_name(Stage s) {
     case Stage::Validate: return "validate";
     case Stage::Tet: return "tet";
     case Stage::L1: return "l1";
-    default: return "structure";
+    case Stage::Structure: return "structure";
+    default: return "simplify";
   }
 }
 
@@ -44,6 +46,7 @@ nlohmann::json PipelineParams::to_json() const {
   return {{"tet", tet.to_json()},
           {"l1", l1.to_json()},
           {"final_map", final_map.to_json()},
+          {"simplify", simplify.to_json()},
           {"feature_edges", feature_edges}};
 }
 
@@ -56,6 +59,8 @@ void PipelineParams::update_from_json(const nlohmann::json& j) {
       l1.update_from_json(it.value());
     else if (k == "final_map")
       final_map.update_from_json(it.value());
+    else if (k == "simplify")
+      simplify.update_from_json(it.value());
     else if (k == "feature_edges")
       feature_edges = it.value().get<std::string>();
     else
@@ -274,6 +279,103 @@ nlohmann::json run_pipeline(const PipelineOptions& opt, const PipelineParams& pa
                std::to_string(fm.seconds) + " s");
     log.info("final map: arap mean " + std::to_string(fm.arap_mean) + ", max " +
              std::to_string(fm.arap_max) + ", inverted tets " + std::to_string(fm.inverted_tets));
+    save_stats();
+    if (opt.until == Stage::Structure) {
+      timing["total"] = seconds_since(t_all);
+      save_stats();
+      return stats;
+    }
+
+    // -- simplify: Chen 2019 height simplification and re-mapping with the new heights
+    if (!params.simplify.enabled) {
+      stats["simplify"] = {{"enabled", false}};
+      log.info("simplify: disabled");
+    } else {
+      t0 = std::chrono::steady_clock::now();
+      // Patch graph of the exact (normalized) polycube: chain ends follow its heights.
+      PatchGraph g_exact = build_patch_graph(fm.X, tets.B, mesh.topo, labels);
+      SimplifiedPolycube sp = simplify_and_remap(rest, fm.X, tets.T, tets.B, g_exact, fm.heights,
+                                                 params.simplify, params.final_map);
+      const SimplifyResult& sr = sp.simplify;
+      const MatX3d simplified = norm.inverse(sp.map.X);
+      auto out_height = [&](int axis, double h) { return h / norm.scale + norm.center(axis); };
+
+      nlohmann::json patches_j = nlohmann::json::array();
+      for (size_t p = 0; p < g_exact.patches.label.size(); ++p) {
+        const int axis = g_exact.patches.label[p] / 2;
+        patches_j.push_back({{"id", p},
+                             {"axis", axis},
+                             {"label", g_exact.patches.label[p]},
+                             {"group", sr.group_of_patch[p]},
+                             {"height_before", out_height(axis, fm.heights[p])},
+                             {"height_after", out_height(axis, sr.patch_height[p])}});
+      }
+      nlohmann::json merges_j = nlohmann::json::array();
+      for (const MergeRecord& m : sr.merges) {
+        const int axis = sp.graph.groups[static_cast<size_t>(m.a)].axis;
+        merges_j.push_back({{"a", m.a}, {"b", m.b}, {"axis", axis},
+                            {"height", out_height(axis, m.height)}, {"cost", m.cost}});
+      }
+      nlohmann::json sj = sr.to_json();
+      sj["merges"] = merges_j;
+      sj["patches"] = patches_j;
+      sj["graph_normalized"] = sp.graph.to_json();
+      sj["max_stretch"] = params.simplify.max_stretch;
+      write_json(out / "05_simplify.json", sj);
+
+      TetMesh s_mesh = tets;
+      s_mesh.X = simplified;
+      write_tmsh(out / "05_polycube_simplified.tmsh", s_mesh);
+      Eigen::VectorXi inv2(tets.T.rows());
+      for (Index t = 0; t < tets.T.rows(); ++t) inv2(t) = tet_volume(simplified, tets.T, t) > 0.0 ? 0 : 1;
+      write_vtu_tets(out / "05_polycube_simplified.vtu", simplified, tets.T,
+                     {CellField::scalar("arap", sp.map.arap_per_tet), CellField::integer("inverted", inv2)});
+
+      const double sdiag = (simplified.colwise().maxCoeff() - simplified.colwise().minCoeff()).norm();
+      nlohmann::json st = {
+          {"enabled", true},
+          {"max_stretch", params.simplify.max_stretch},
+          {"cuts_before", sj["cuts_before"]},
+          {"cuts_after", sj["cuts_after"]},
+          {"merges", sr.merges.size()},
+          {"merges_proposed", sr.merges_proposed},
+          {"chain_edges", sr.chain_edges},
+          {"separation_edges", sr.separation_edges},
+          {"width_edges", sr.width_edges},
+          {"inverted_reference", sp.inverted_reference},
+          {"inverted_kept", sp.inverted_kept},
+          {"probe_maps", sp.probe_maps},
+          {"chains_without_ends", sp.graph.chains_without_ends},
+          {"min_ratio", sr.min_ratio},
+          {"max_ratio", sr.max_ratio},
+          {"arap_mean", sp.map.arap_mean},
+          {"arap_max", sp.map.arap_max},
+          {"inverted_tets", sp.map.inverted_tets},
+          {"inverted_before_untangle", sp.map.inverted_before_untangle},
+          {"max_planarity_error_rel", sp.map.max_planarity_error / norm.scale / sdiag},
+          {"topology", sp.topology.to_json()},
+          {"seconds_simplify", sp.seconds_simplify},
+          {"seconds_map", sp.map.seconds}};
+      stats["simplify"] = st;
+      timing["simplify"] = seconds_since(t0);
+      log.info("simplify: cuts " + std::to_string(sr.cuts_total_before()) + " -> " +
+               std::to_string(sr.cuts_total_after()) + " (" + std::to_string(sr.merges.size()) +
+               " of " + std::to_string(sr.merges_proposed) + " merges kept, " +
+               std::to_string(sr.chain_edges) + " chain + " + std::to_string(sr.separation_edges) +
+               " separation + " + std::to_string(sr.width_edges) + " width edges, ratio [" +
+               std::to_string(sr.min_ratio) + ", " + std::to_string(sr.max_ratio) + "])");
+      log.detail("simplify: rollback inverted tets " + std::to_string(sp.inverted_kept) + " (reference " +
+                 std::to_string(sp.inverted_reference) + ", " + std::to_string(sp.probe_maps) +
+                 " probe maps)");
+      log.info("simplify: re-mapped polycube arap mean " + std::to_string(sp.map.arap_mean) + ", max " +
+               std::to_string(sp.map.arap_max) + ", inverted tets " +
+               std::to_string(sp.map.inverted_tets));
+      if (!sp.topology.ok) {
+        std::string msg = "simplified polycube topology check failed:";
+        for (const auto& v : sp.topology.violations) msg += " " + v + ";";
+        throw Error(msg);
+      }
+    }
   } catch (const Error& e) {
     timing["total"] = seconds_since(t_all);
     stats["error"] = e.what();

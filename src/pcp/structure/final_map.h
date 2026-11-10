@@ -15,6 +15,9 @@ struct FinalMapParams {
   double rel_tolerance = 1e-7;  // stop when the relative ARAP energy change is below this
   bool laplacian_init = true;   // Huang 2014 eq. (17) initialization
   bool untangle = true;         // locally repair inverted tets after the ARAP iterations
+  // Upper bound on the work of the repair, in tet energy evaluations over all passes; the repair
+  // stops when it is used up (deterministic, unlike a time limit).
+  double untangle_budget = 1e9;
   nlohmann::json to_json() const;
   void update_from_json(const nlohmann::json& j);
 };

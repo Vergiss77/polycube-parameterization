@@ -18,7 +18,8 @@ nlohmann::json FinalMapParams::to_json() const {
           {"max_iterations", max_iterations},
           {"rel_tolerance", rel_tolerance},
           {"laplacian_init", laplacian_init},
-          {"untangle", untangle}};
+          {"untangle", untangle},
+          {"untangle_budget", untangle_budget}};
 }
 
 void FinalMapParams::update_from_json(const nlohmann::json& j) {
@@ -30,6 +31,7 @@ void FinalMapParams::update_from_json(const nlohmann::json& j) {
   if (j.contains("rel_tolerance")) rel_tolerance = j.at("rel_tolerance").get<double>();
   if (j.contains("laplacian_init")) laplacian_init = j.at("laplacian_init").get<bool>();
   if (j.contains("untangle")) untangle = j.at("untangle").get<bool>();
+  if (j.contains("untangle_budget")) untangle_budget = j.at("untangle_budget").get<double>();
 }
 
 namespace {
@@ -160,7 +162,8 @@ class ReducedSolver {
 // with Armijo backtracking. tau_t is a small fraction of the rest volume. Returns the number of
 // inverted tets left.
 Index untangle_inverted(const MatX3d& rest, MatX3d& X, const MatX4i& T, const TetGradients& grads,
-                        const std::vector<std::array<char, 3>>& movable, int rings) {
+                        const std::vector<std::array<char, 3>>& movable, int rings,
+                        double& budget) {
   auto vol = [&](const MatX3d& Y, Index t) { return tet_volume(Y, T, t); };
   std::vector<Index> inverted;
   for (Index t = 0; t < T.rows(); ++t)
@@ -200,7 +203,9 @@ Index untangle_inverted(const MatX3d& rest, MatX3d& X, const MatX4i& T, const Te
       }
 
   const double w = 1e3;
+  const double cost = static_cast<double>(tets.size());  // tet evaluations per energy/gradient call
   auto energy = [&](const MatX3d& Y) {
+    budget -= cost;
     double e = 0.0;
     for (int t : tets) {
       const double V = grads.rest_volume(t);
@@ -212,6 +217,7 @@ Index untangle_inverted(const MatX3d& rest, MatX3d& X, const MatX4i& T, const Te
     return e;
   };
   auto gradient = [&](const MatX3d& Y, MatX3d& G) {
+    budget -= cost;
     G.setZero(Y.rows(), 3);
     for (int t : tets) {
       const double V = grads.rest_volume(t);
@@ -242,12 +248,12 @@ Index untangle_inverted(const MatX3d& rest, MatX3d& X, const MatX4i& T, const Te
   double e = energy(X);
   MatX3d G;
   double step = 1e-3;
-  for (int it = 0; it < 5000; ++it) {
+  for (int it = 0; it < 5000 && budget > 0.0; ++it) {
     gradient(X, G);
     const double gn2 = G.squaredNorm();
     if (gn2 < 1e-30) break;
     bool ok = false;
-    for (int ls = 0; ls < 40; ++ls) {
+    for (int ls = 0; ls < 40 && budget > 0.0; ++ls) {
       MatX3d Y = X - step * G;
       double en = energy(Y);
       if (en <= e - 1e-4 * step * gn2) {
@@ -422,8 +428,9 @@ FinalMapResult compute_final_map(const MatX3d& rest, const MatX3d& X0, const Mat
       if (!(tet_volume(X, T, t) > 0.0)) ++res.inverted_before_untangle;
     // Repeat on the remaining inverted tets with growing neighborhoods while it helps.
     Index left = res.inverted_before_untangle;
-    for (int pass = 0; pass < 6 && left > 0; ++pass) {
-      Index now = untangle_inverted(rest, X, T, grads, movable, 2 + pass);
+    double budget = P.untangle_budget;
+    for (int pass = 0; pass < 6 && left > 0 && budget > 0.0; ++pass) {
+      Index now = untangle_inverted(rest, X, T, grads, movable, 2 + pass, budget);
       if (now >= left && pass > 0) break;
       left = now;
     }

@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 #include <cstdlib>
+#include <sstream>
 
 #include "helpers.h"
 #include "pcp/geom/normalize.h"
@@ -277,4 +278,92 @@ TEST_CASE("profile_heights" * doctest::test_suite("profile") * doctest::skip()) 
   }
   for (auto& [k, v] : where) MESSAGE(v << "x  " << k);
   MESSAGE("inverted " << r.inverted_tets << " flipped chains " << flipped << " collapsed (<20%) " << collapsed);
+}
+
+#include "pcp/geom/boundary_topology.h"
+#include "pcp/structure/height_simplify.h"
+
+// Height simplification on a finished run: PCP_DIR=<output dir with 01_tet.tmsh,
+// 03_patch_graph.json and 04_polycube.tmsh>, optional PCP_STRETCH=<s list, comma separated> and
+// PCP_REMAP=1 to also re-map the volume for each s (as the pipeline's simplify stage does).
+TEST_CASE("profile_simplify" * doctest::test_suite("profile") * doctest::skip()) {
+  const char* dir_c = std::getenv("PCP_DIR");
+  REQUIRE(dir_c != nullptr);
+  const std::filesystem::path dir(dir_c);
+  TetMesh tet = read_tmsh(dir / "01_tet.tmsh");
+  TetMesh pc = read_tmsh(dir / "04_polycube.tmsh");
+  const auto pj = nlohmann::json::parse(text::read_file(dir / "03_patch_graph.json"));
+  Eigen::VectorXi labels = Eigen::VectorXi::Constant(pc.B.rows(), -1);
+  static const std::map<std::string, int> names = {{"+X", 0}, {"-X", 1}, {"+Y", 2}, {"-Y", 3}, {"+Z", 4}, {"-Z", 5}};
+  for (const auto& p : pj["patches"])
+    for (int f : p["faces"].get<std::vector<int>>()) labels(f) = names.at(p["label"].get<std::string>());
+  REQUIRE(labels.minCoeff() >= 0);
+  const Normalization norm = normalization_for(tet.X, tet.B);
+  const MatX3d rest = norm.apply(tet.X), X = norm.apply(pc.X);
+  BoundaryTopology topo = build_boundary_topology(pc.B);
+  PatchGraph g = build_patch_graph(X, pc.B, topo, labels);
+  HeightGraph chains_only = build_height_graph(g, g.height);
+  HeightGraph hg = chains_only;
+  add_separation_edges(hg, g, g.height, X, pc.B);
+  add_width_edges(hg, g, g.height, X, pc.B);
+  MESSAGE("width edges " << hg.width_edges);
+  int per_axis[3] = {0, 0, 0};
+  for (const HeightGroup& grp : hg.groups) ++per_axis[grp.axis];
+  MESSAGE("patches " << g.patches.label.size() << " groups " << hg.groups.size() << " (x "
+                     << per_axis[0] << " y " << per_axis[1] << " z " << per_axis[2] << ") chain edges "
+                     << chains_only.edges.size() << " separation edges " << hg.separation_edges);
+  const bool remap = std::getenv("PCP_REMAP") != nullptr;
+  std::string list = std::getenv("PCP_STRETCH") ? std::getenv("PCP_STRETCH") : "1.5,2,3";
+  std::stringstream ss(list);
+  for (std::string item; std::getline(ss, item, ',');) {
+    SimplifyParams sp;
+    sp.max_stretch = std::atof(item.c_str());
+    SimplifyResult a = simplify_heights(chains_only, sp.max_stretch), r = simplify_heights(hg, sp.max_stretch);
+    std::string extra;
+    if (remap) {
+      FinalMapParams fp;
+      fp.untangle = std::getenv("PCP_NOUNTANGLE") == nullptr;
+      SimplifiedPolycube out = simplify_and_remap(rest, X, tet.T, pc.B, g, g.height, sp, fp);
+      extra = " | arap " + std::to_string(out.map.arap_mean) + " / " + std::to_string(out.map.arap_max) +
+              ", inverted " + std::to_string(out.map.inverted_tets) + " (before untangle " +
+              std::to_string(out.map.inverted_before_untangle) + "), topology " +
+              (out.topology.ok ? "ok" : "FAILED") + ", map " + std::to_string(out.map.seconds) + " s";
+    }
+    if (std::getenv("PCP_MERGES"))
+      for (const MergeRecord& m : r.merges) {
+        const HeightGroup &ga = hg.groups[size_t(m.a)], &gb = hg.groups[size_t(m.b)];
+        auto oh = [&](double h) { return h / norm.scale + norm.center(ga.axis); };
+        MESSAGE("  merge axis " << ga.axis << " groups " << m.a << " (h " << oh(ga.height) << ", "
+                                << ga.patches.size() << " patches, label " << g.patches.label[size_t(ga.patches[0])]
+                                << ") + " << m.b << " (h " << oh(gb.height) << ", label "
+                                << g.patches.label[size_t(gb.patches[0])] << ") -> " << oh(m.height)
+                                << " cost " << m.cost);
+      }
+    if (const char* ks = std::getenv("PCP_PREFIX")) {
+      std::stringstream kk(ks);
+      for (std::string it2; std::getline(kk, it2, ',');) {
+        const size_t k = std::min(r.merges.size(), size_t(std::atoi(it2.c_str())));
+        HeightState st = HeightState::initial(hg);
+        for (size_t m = 0; m < k; ++m) {
+          for (auto& x : st.rep) if (x == r.merges[m].b) x = r.merges[m].a;
+          st.height[size_t(r.merges[m].a)] = r.merges[m].height;
+        }
+        std::vector<double> ph(g.patches.label.size());
+        for (size_t gi = 0; gi < hg.groups.size(); ++gi)
+          for (int p : hg.groups[gi].patches) ph[size_t(p)] = st.height[size_t(st.rep[gi])];
+        FinalMapParams fp;
+        fp.heights_fixed = true;
+        fp.untangle = false;
+        FinalMapResult fm = compute_final_map(rest, X, tet.T, pc.B, g, ph, fp);
+        int cuts = 0;
+        for (size_t gi = 0; gi < hg.groups.size(); ++gi) cuts += st.rep[gi] == int(gi);
+        MESSAGE("  prefix " << k << " (last cost " << (k ? r.merges[k - 1].cost : 0.0) << "): cuts " << cuts
+                            << ", arap " << fm.arap_mean << " / " << fm.arap_max << ", inverted " << fm.inverted_tets);
+      }
+    }
+    MESSAGE("s " << sp.max_stretch << ": cuts " << r.cuts_total_before() << " -> " << r.cuts_total_after()
+                 << " (x " << r.cuts_after[0] << " y " << r.cuts_after[1] << " z " << r.cuts_after[2]
+                 << "), merges " << r.merges.size() << ", ratio [" << r.min_ratio << ", " << r.max_ratio
+                 << "]; chains only: " << a.cuts_total_after() << extra);
+  }
 }

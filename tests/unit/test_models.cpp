@@ -2,13 +2,13 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
-#include <fstream>
 
 #include <Eigen/Geometry>
 
 #include "helpers.h"
 #include "pcp/core/constants.h"
 #include "pcp/io/off.h"
+#include "pcp/io/text.h"
 #include "pcp/io/tmsh.h"
 #include "pcp/pipeline/pipeline.h"
 #include "pcp/structure/labeling.h"
@@ -60,6 +60,34 @@ void check_common(const nlohmann::json& s, Acceptance acc = {}) {
   CHECK(static_cast<double>(inverted) <= acc.max_inverted_fraction * static_cast<double>(tets));
 }
 
+// Height simplification checks (spec polycube-simplification).
+void check_simplify(const nlohmann::json& s, bool strictly_fewer_cuts, Acceptance acc = {}) {
+  REQUIRE(s.contains("simplify"));
+  const nlohmann::json& sp = s["simplify"];
+  REQUIRE(sp["enabled"].get<bool>());
+  for (auto it = sp.begin(); it != sp.end(); ++it)
+    if (!it.value().is_object()) CHECK_MESSAGE(!it.value().is_null(), "simplify." << it.key() << " is NaN");
+  const int before = sp["cuts_before"]["total"].get<int>(), after = sp["cuts_after"]["total"].get<int>();
+  if (strictly_fewer_cuts) CHECK(after < before);
+  else CHECK(after <= before);
+  const double smax = sp["max_stretch"].get<double>();
+  CHECK(sp["min_ratio"].get<double>() >= 1.0 / smax - 1e-9);
+  CHECK(sp["max_ratio"].get<double>() <= smax + 1e-9);
+  CHECK(sp["max_planarity_error_rel"].get<double>() <= 1e-9);
+  CHECK(sp["topology"]["ok"].get<bool>());
+  const long long inverted = sp["inverted_tets"].get<long long>();
+  CHECK(static_cast<double>(inverted) <= acc.max_inverted_fraction * s["tets"].get<double>());
+  CHECK(sp["merges"].get<int>() <= sp["merges_proposed"].get<int>());
+  CHECK(sp["inverted_kept"].get<long long>() <= sp["inverted_reference"].get<long long>());
+  MESSAGE("simplify: cuts " << before << " -> " << after << ", merges " << sp["merges"] << " of "
+                            << sp["merges_proposed"] << ", edges " << sp["chain_edges"] << " + "
+                            << sp["separation_edges"] << " + " << sp["width_edges"]
+                            << ", ratio [" << sp["min_ratio"] << ", " << sp["max_ratio"]
+                            << "], arap " << sp["arap_mean"] << " / " << sp["arap_max"]
+                            << ", inverted " << inverted << " (before untangle "
+                            << sp["inverted_before_untangle"] << ")");
+}
+
 }  // namespace
 
 TEST_CASE("model_ispar" * doctest::test_suite("models")) {
@@ -69,6 +97,7 @@ TEST_CASE("model_ispar" * doctest::test_suite("models")) {
   CHECK(s["l1"]["arap_mean"].get<double>() < 1e-3);
   CHECK(s["patches"].get<int>() == 14);
   CHECK(s["corners"].get<int>() == 24);
+  check_simplify(s, false);
 
   // Labels of the deformed boundary agree with the original normals.
   SurfaceMesh surface = read_off(input);
@@ -80,12 +109,18 @@ TEST_CASE("model_ispar" * doctest::test_suite("models")) {
   TetMesh a = read_tmsh(testutil::temp_dir() / "model_ispar" / "04_polycube.tmsh");
   TetMesh b = read_tmsh(testutil::temp_dir() / "model_ispar_repeat" / "04_polycube.tmsh");
   CHECK(a.X == b.X);
+  // Simplification is deterministic too.
+  auto sa = nlohmann::json::parse(text::read_file(testutil::temp_dir() / "model_ispar" / "05_simplify.json"));
+  auto sb = nlohmann::json::parse(text::read_file(testutil::temp_dir() / "model_ispar_repeat" / "05_simplify.json"));
+  CHECK(sa["merges"] == sb["merges"]);
+  CHECK(sa["patches"] == sb["patches"]);
 }
 
 TEST_CASE("model_clevis" * doctest::test_suite("models")) {
   const fs::path input = testutil::models_dir() / "CLEVIS-D64EEBFA.off";
   nlohmann::json s = run(input, "model_clevis");
   check_common(s);
+  check_simplify(s, true);
   const int patches = s["patches"].get<int>();
 
   // Orientation independence: the same model rotated by 30 degrees about an arbitrary axis.
@@ -116,6 +151,13 @@ TEST_CASE("model_tailsitter" * doctest::test_suite("models")) {
   const fs::path input = testutil::models_dir() / "TAILSITTER.off";
   nlohmann::json s = run(input, "model_tailsitter");
   check_common(s, Acceptance{5e-3, 1e-4});
+  check_simplify(s, true, Acceptance{5e-3, 1e-4});
+  // A larger stretch bound merges at least as much (re-run on the saved graph, no re-mapping).
+  auto sj = nlohmann::json::parse(text::read_file(testutil::temp_dir() / "model_tailsitter" / "05_simplify.json"));
+  const HeightGraph hg = HeightGraph::from_json(sj["graph_normalized"]);
+  const SimplifyResult lo = simplify_heights(hg, 1.5), hi = simplify_heights(hg, 3.0);
+  MESSAGE("tailsitter cuts with s = 1.5: " << lo.cuts_total_after() << ", s = 3: " << hi.cuts_total_after());
+  CHECK(hi.cuts_total_after() <= lo.cuts_total_after());
   // The arms run along the 45-degree diagonals: the global rotation is 45 degrees about Z.
   const double angle = rotation_angle_deg(s);
   const double off = std::abs(std::fmod(angle, 90.0) - 45.0);
@@ -131,6 +173,7 @@ TEST_CASE("model_tailsitter_beta" * doctest::test_suite("models")) {
   PipelineParams lo, hi;
   lo.l1.beta = 0.2;
   hi.l1.beta = 4.0;
+  lo.simplify.enabled = hi.simplify.enabled = false;  // this test compares the l1 structure only
   nlohmann::json a = run(input, "model_tailsitter_beta_lo", lo);
   nlohmann::json b = run(input, "model_tailsitter_beta_hi", hi);
   CHECK(b["corners"].get<int>() <= a["corners"].get<int>());

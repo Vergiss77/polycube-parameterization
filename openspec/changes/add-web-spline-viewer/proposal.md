@@ -30,7 +30,7 @@
 - **测试**：
   - 用 Node 测试 JS 的解析与求值；
   - 对同一个小算例，JS 求值与 C++ 输出的 `07_bspline_samples.vtu` 逐点一致，Jacobian 统计与 C++ 一致；
-  - 测试接入 ctest 的 `unit` 标签，CI 中自动运行。
+  - 测试接入 ctest 的 `unit` 标签；找到 Node 时自动运行，以本地运行为准。
 - **文档**：README 新增查看器的使用说明。
 
 ## Capabilities

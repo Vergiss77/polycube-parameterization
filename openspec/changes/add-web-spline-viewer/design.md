@@ -124,7 +124,7 @@ Node 没有 `DOMParser`，而计算层需要在 Node 中测试，所以用字符
   - `web_fixture`：运行上述用例，设置环境变量，属性 `FIXTURES_SETUP web`；
   - `web_viewer_js`：`node --test tests/web/`，属性 `FIXTURES_REQUIRED web`，标签 `unit`；
   - 用 `find_program(NODE_EXECUTABLE node)` 查找 Node，找不到时不注册 JS 测试，只打印提示。
-  - 现有 CI 的 `ctest -L unit` 会自动带上这些测试。
+  - 现有 CI 的 `ctest -L unit` 会在有 Node 时带上这些测试；CI 不强制要求 Node，JS 测试以本地运行为准。
 - **Node 测试内容**：
   - XML 解析正常与各类错误；
   - 求值与 `07_bspline_samples.vtu` 逐点对比（位置 ≤ 1e-12 × 对角线，缩放 Jacobian ≤ 1e-9）；

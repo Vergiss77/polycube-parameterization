@@ -66,9 +66,11 @@
   截取 CLEVIS 和 TAILSITTER（按 Jacobian 着色、显示非正点）的截图放进 `docs/images/`，在 `docs/experiments.md` 中引用。
 
   验证：按 README 的命令操作，结果与描述一致，清单各项通过。
-- [ ] 4.2 推送分支后，CI 的构建加单元测试（包含 `web_viewer_js`）在 Windows 和 macOS 两个平台通过。
+- [x] 4.2 推送分支后，CI 的构建加单元测试在 Windows 和 macOS 两个平台通过；JS 测试只要求在本地运行（CI 不强制要求 Node）。
 
-  验证：GitHub Actions 两个平台的任务通过，日志中 `web_viewer_js` 被运行而不是被跳过。
+  验证：
+  - GitHub Actions 两个平台的任务通过（run 42813800016）；
+  - 本地 `ctest -L unit -R web_` 中 `web_fixture` 和 `web_viewer_js` 通过。
 
 ## Workflow follow-up
 

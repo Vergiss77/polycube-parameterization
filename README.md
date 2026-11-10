@@ -1,14 +1,15 @@
 # polycube-parameterization
 
-基于 polycube 的多块体参数化实验代码。当前已实现流水线的前半段：
+基于 polycube 的多块体参数化实验代码。当前流水线：
 
 ```
 OFF 表面 -> 校验 -> TetGen 四面体化 -> l1 polycube 变形 (Huang et al. 2014)
          -> 标号清理 / 面片图 -> 带约束 ARAP 的最终 polycube 映射
          -> 有向图高度简化 (Chen et al. 2019) -> 按新高度重新映射
+         -> 沿切割面分块 -> 三变量 B 样条多片体拟合（块间 C0）
 ```
 
-后续计划：分块、三变量 B 样条拟合与质量优化。
+后续计划：控制点质量优化（消除负 Jacobian）。
 
 ## 构建
 
@@ -53,7 +54,7 @@ build/apps/pcp_cli/pcp_cli models/CLEVIS-D64EEBFA.off -o out/clevis
 
 | 选项 | 说明 |
 |---|---|
-| `--until validate\|tet\|l1\|structure\|simplify` | 只运行到指定阶段（默认 `simplify`，即全部阶段） |
+| `--until validate\|tet\|l1\|structure\|simplify\|blocks\|fit` | 只运行到指定阶段（默认 `fit`，即全部阶段） |
 | `--resume-from out/clevis/01_tet.tmsh` | 用保存的四面体网格续跑，跳过四面体化 |
 | `--params p.json` | 参数文件，格式同输出目录中的 `params.json`；命令行选项会覆盖它 |
 | `--beta 2` | 复杂度权重 β（越大 polycube 越简单） |
@@ -63,6 +64,8 @@ build/apps/pcp_cli/pcp_cli models/CLEVIS-D64EEBFA.off -o out/clevis
 | `--tet-size-factor 2` | 四面体边长 / 表面平均边长 |
 | `--no-simplify` | 跳过高度简化（等价于旧版流水线的输出） |
 | `--max-stretch 2` | 高度简化中每条棱线/间隔的最大拉伸比 s（≥ 1，越大合并越多、畸变越大） |
+| `--degree 3` | B 样条体的次数（≥ 1） |
+| `--element-size 0.05` | B 样条目标单元尺寸，相对于 polycube 包围盒对角线；每个切割区间分 max(1, round(长度 / 尺寸)) 个单元 |
 | `-q` / `-v` | 安静 / 详细输出 |
 
 退出码：成功为 0，任何错误为 1（错误信息输出到 stderr，并写入 `stats.json` 的 `error` 字段）。
@@ -72,7 +75,7 @@ build/apps/pcp_cli/pcp_cli models/CLEVIS-D64EEBFA.off -o out/clevis
 | 文件 | 内容 |
 |---|---|
 | `params.json` | 本次运行实际使用的全部参数 |
-| `stats.json` | 统计：输入规模与亏格、四面体数、全局旋转、polycube 误差、ARAP 畸变、面片/角点/棱线数、翻转四面体数、阶段与迭代数、各阶段耗时；`simplify` 字段为高度简化的结果（简化前后切割面数、合并次数、长度比范围、简化后畸变与翻转数）。顶层的畸变和翻转数指 `04` 的结果 |
+| `stats.json` | 统计：输入规模与亏格、四面体数、全局旋转、polycube 误差、ARAP 畸变、面片/角点/棱线数、翻转四面体数、阶段与迭代数、各阶段耗时；`simplify` 字段为高度简化的结果（简化前后切割面数、合并次数、长度比范围、简化后畸变与翻转数）；`blocks` 字段为分块结果（块数、每轴切割坐标数、网格格子数、内部面与边界面数、体积相对差、最薄块的边长与对角线之比）；`fit` 字段为拟合结果（控制点数、采样点数、拟合误差与到原表面的距离（均除以输入包围盒对角线）、缩放 Jacobian 的最小/平均值与非正点数、C0 最大偏差、找不到所在四面体的采样点数）。顶层的畸变和翻转数指 `04` 的结果 |
 | `log.txt` | 完整日志（含每个调度阶段的 α、ε、误差、畸变） |
 | `00_validate.json` | 输入表面校验结果 |
 | `01_tet.tmsh` / `01_tet.vtu` | 四面体网格（`.tmsh` 为无损文本格式，用于续跑） |
@@ -83,6 +86,10 @@ build/apps/pcp_cli/pcp_cli models/CLEVIS-D64EEBFA.off -o out/clevis
 | `04_polycube.tmsh` / `04_polycube.vtu` | 最终 polycube 四面体网格（简化前），带 `arap` 与 `inverted` 字段 |
 | `05_simplify.json` | 高度简化：每个面片的简化前后高度和所属高度组、按顺序的合并记录（两组、合并高度、代价）、每轴切割面数、简化用的有向图（归一化单位） |
 | `05_polycube_simplified.tmsh` / `.vtu` | 按简化后高度重新求解的 polycube，带 `arap` 与 `inverted` 字段 |
+| `06_blocks.json` | 分块结构：每轴切割坐标（输出单位）；每个块的网格位置、包围盒与体积（归一化的 polycube 坐标）、6 个面（`x_lo`…`z_hi`）的相邻块或所属面片 |
+| `06_blocks_polycube.vtu` / `06_blocks_input.vtu` | polycube 与原模型上的四面体网格，带逐四面体 `block` 字段（按四面体在 polycube 上的重心所在的块） |
+| `07_bspline.xml` | B 样条多片体，G+Smo MultiPatch XML：每块一个 `TensorBSpline3`（id 与块编号相同，控制点按 u 最快、w 最慢排列，输入模型的长度单位与坐标系），以及块间接口和边界面 |
+| `07_bspline_samples.vtu` | 每块评估网格上的样条体采样（六面体），带逐单元 `block` 和逐点 `scaled_jacobian` 字段 |
 
 所有几何量都使用输入模型的长度单位；polycube 结果包含全局旋转。
 
@@ -93,6 +100,25 @@ build/apps/pcp_cli/pcp_cli models/CLEVIS-D64EEBFA.off -o out/clevis
 3. 打开 `04_polycube.vtu`，着色选 `arap` 查看畸变分布；用 `Filters > Threshold`
    （字段 `inverted`，范围 1~1）检查是否有翻转单元；用 `Clip` 查看内部。
 4. 打开 `05_polycube_simplified.vtu` 与 `04_polycube.vtu` 对比，查看高度简化把哪些面对齐到了同一平面。
+5. 打开 `06_blocks_input.vtu`，着色选 `block`，查看分块落在原模型上的位置；`06_blocks_polycube.vtu` 是同样的分块在 polycube 上的样子。
+6. 打开 `07_bspline_samples.vtu`，着色选 `scaled_jacobian`（点数据）查看样条体质量；用 `Threshold`（`scaled_jacobian` ≤ 0）找出 Jacobian 非正的位置。
+
+## 用 G+Smo 读取样条体
+
+`07_bspline.xml` 按 G+Smo（stable 分支）读取 MultiPatch 的代码写出：`src/gsIO/gsXml.cpp` 的 `getInterfaces` / `getBoundaries`，`src/gsIO/gsXmlUtils.hpp` 的 `gsXml<gsMultiPatch>::get`，面编号见 `src/gsCore/gsBoundary.h`（1–6 = u=0, u=1, v=0, v=1, w=0, w=1）。每个接口一行：`块1 面1 块2 面2`，接着是方向映射（恒等 `0 1 2`）和方向符号（法向为 0，切向为 1），例如 `0 2 1 1 0 1 2 0 1 1`。
+
+本项目不依赖 G+Smo，CI 也不检查这一步。装有 G+Smo 时可以这样验证：
+
+```cpp
+#include <gismo.h>
+int main() {
+  gismo::gsMultiPatch<> mp;
+  gismo::gsReadFile<>("out/clevis/07_bspline.xml", mp);
+  gismo::gsInfo << mp.nPatches() << " patches, " << mp.interfaces().size() << " interfaces, "
+                << mp.boundaries().size() << " boundary sides\n";
+  // 与 stats.json 中 blocks.blocks / interior_faces / boundary_faces 一致即说明拓扑读入正确
+}
+```
 
 ## 参考文献
 

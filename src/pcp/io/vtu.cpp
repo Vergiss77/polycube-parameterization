@@ -26,8 +26,12 @@ namespace {
 template <int K>
 void write_vtu(const std::filesystem::path& path, const MatX3d& X,
                const Eigen::Matrix<int, Eigen::Dynamic, K>& C, int vtk_type,
-               const std::vector<CellField>& fields) {
+               const std::vector<CellField>& fields, const std::vector<PointField>& point_fields = {}) {
   const Index np = X.rows(), nc = C.rows();
+  for (const auto& f : point_fields)
+    if (static_cast<Index>(f.values.size()) != np)
+      throw Error("vtu point field '" + f.name + "' has " + std::to_string(f.values.size()) +
+                  " values but mesh has " + std::to_string(np) + " points");
   for (const auto& f : fields)
     if (static_cast<Index>(f.values.size()) != nc)
       throw Error("vtu field '" + f.name + "' has " + std::to_string(f.values.size()) +
@@ -69,9 +73,8 @@ void write_vtu(const std::filesystem::path& path, const MatX3d& X,
     s += '\n';
   }
   s += "</DataArray>\n</Cells>\n";
-  if (!fields.empty()) {
-    s += "<CellData>\n";
-    for (const auto& f : fields) {
+  auto append_arrays = [&s](const std::vector<CellField>& list) {
+    for (const auto& f : list) {
       s += "<DataArray type=\"";
       s += f.type == CellField::Type::Int32 ? "Int32" : "Float64";
       s += "\" Name=\"" + f.name + "\" format=\"ascii\">\n";
@@ -84,6 +87,15 @@ void write_vtu(const std::filesystem::path& path, const MatX3d& X,
       }
       s += "</DataArray>\n";
     }
+  };
+  if (!point_fields.empty()) {
+    s += "<PointData>\n";
+    append_arrays(point_fields);
+    s += "</PointData>\n";
+  }
+  if (!fields.empty()) {
+    s += "<CellData>\n";
+    append_arrays(fields);
     s += "</CellData>\n";
   }
   s += "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
@@ -100,6 +112,11 @@ void write_vtu_tets(const std::filesystem::path& path, const MatX3d& X, const Ma
 void write_vtu_surface(const std::filesystem::path& path, const MatX3d& V, const MatX3i& F,
                        const std::vector<CellField>& cell_fields) {
   write_vtu<3>(path, V, F, 5 /* VTK_TRIANGLE */, cell_fields);
+}
+
+void write_vtu_hexes(const std::filesystem::path& path, const MatX3d& X, const MatX8i& H,
+                     const std::vector<CellField>& cell_fields, const std::vector<PointField>& point_fields) {
+  write_vtu<8>(path, X, H, 12 /* VTK_HEXAHEDRON */, cell_fields, point_fields);
 }
 
 }  // namespace pcp

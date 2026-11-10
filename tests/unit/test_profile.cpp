@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <sstream>
 
+#include "pcp/blocks/spline_fit.h"
 #include "helpers.h"
 #include "pcp/geom/normalize.h"
 #include "pcp/io/off.h"
@@ -366,4 +367,75 @@ TEST_CASE("profile_simplify" * doctest::test_suite("profile") * doctest::skip())
                  << "), merges " << r.merges.size() << ", ratio [" << r.min_ratio << ", " << r.max_ratio
                  << "]; chains only: " << a.cuts_total_after() << extra);
   }
+}
+
+// Block decomposition and B-spline fitting only, from an existing output directory (design D9).
+// PCP_DIR: output directory (01_tet.tmsh, 03_patch_graph.json, and 05_polycube_simplified.tmsh
+// with 05_simplify.json, or 04_polycube.tmsh when simplification was disabled).
+// PCP_ELEMENT / PCP_SMOOTH: comma-separated element sizes and smoothing weights to compare;
+// PCP_DEGREE, PCP_SAMPLES: degree and samples per element.
+TEST_CASE("profile_fit" * doctest::test_suite("profile") * doctest::skip()) {
+  const char* dir_c = std::getenv("PCP_DIR");
+  REQUIRE(dir_c != nullptr);
+  const std::filesystem::path dir(dir_c);
+  TetMesh tet = read_tmsh(dir / "01_tet.tmsh");
+  const bool simplified = std::filesystem::exists(dir / "05_polycube_simplified.tmsh");
+  TetMesh pc = read_tmsh(dir / (simplified ? "05_polycube_simplified.tmsh" : "04_polycube.tmsh"));
+  const auto pj = nlohmann::json::parse(text::read_file(dir / "03_patch_graph.json"));
+  Eigen::VectorXi labels = Eigen::VectorXi::Constant(pc.B.rows(), -1);
+  static const std::map<std::string, int> names = {{"+X", 0}, {"-X", 1}, {"+Y", 2}, {"-Y", 3}, {"+Z", 4}, {"-Z", 5}};
+  for (const auto& p : pj["patches"])
+    for (int f : p["faces"].get<std::vector<int>>()) labels(f) = names.at(p["label"].get<std::string>());
+  REQUIRE(labels.minCoeff() >= 0);
+  const Normalization norm = normalization_for(tet.X, tet.B);
+  const MatX3d X = norm.apply(pc.X);
+  BoundaryTopology topo = build_boundary_topology(pc.B);
+  PatchGraph g = build_patch_graph(X, pc.B, topo, labels);
+  // Exact (group) heights, transformed back to normalized units.
+  std::vector<double> heights(g.patches.label.size());
+  if (simplified) {
+    const auto sj = nlohmann::json::parse(text::read_file(dir / "05_simplify.json"));
+    for (const auto& p : sj["patches"]) {
+      const int axis = p["axis"].get<int>();
+      heights[p["id"].get<size_t>()] = (p["height_after"].get<double>() - norm.center(axis)) * norm.scale;
+    }
+  } else {
+    for (const auto& p : pj["patches"])
+      heights[p["id"].get<size_t>()] = (p["height"].get<double>() - norm.center(p["axis"].get<int>())) * norm.scale;
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  const auto cuts = cut_coordinates(X, g.patches.label, heights);
+  const BlockLayout L = build_block_layout(X, pc.B, g.patches.face_patch, g.patches.label, cuts);
+  const double pdiag = (X.colwise().maxCoeff() - X.colwise().minCoeff()).norm();
+  double thinnest = 1e300;
+  for (const Block& b : L.blocks) thinnest = std::min(thinnest, (b.hi - b.lo).minCoeff());
+  MESSAGE("blocks " << L.blocks.size() << " (grid " << L.intervals(0) << " x " << L.intervals(1) << " x "
+                    << L.intervals(2) << " = " << L.grid_cells() << "), interior faces " << L.interior_faces()
+                    << ", boundary faces " << L.boundary_faces() << ", thinnest " << thinnest / pdiag << ", "
+                    << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << " s");
+  const double in_diag = (tet.X.colwise().maxCoeff() - tet.X.colwise().minCoeff()).norm();
+  auto list = [](const char* env, const char* def) {
+    std::vector<double> v;
+    std::stringstream ss(std::getenv(env) ? std::getenv(env) : def);
+    for (std::string item; std::getline(ss, item, ',');) v.push_back(std::atof(item.c_str()));
+    return v;
+  };
+  const int degree = std::getenv("PCP_DEGREE") ? std::atoi(std::getenv("PCP_DEGREE")) : 3;
+  const int samples = std::getenv("PCP_SAMPLES") ? std::atoi(std::getenv("PCP_SAMPLES")) : 4;
+  for (double h : list("PCP_ELEMENT", "0.05"))
+    for (double lambda : list("PCP_SMOOTH", "1e-6")) {
+      t0 = std::chrono::steady_clock::now();
+      const SplineSpace S = build_spline_space(L, degree, h * pdiag);
+      const FitSamples fs = sample_blocks(L, S, samples, X, tet.T, tet.X);
+      const FitSolution sol = fit_volumes(L, S, fs, lambda);
+      const FitQuality q = evaluate_fit(L, S, sol, fs, tet.X, tet.B, in_diag);
+      const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      MESSAGE("h " << h << " lambda " << lambda << ": control points " << S.n_unknowns << ", samples "
+                   << fs.block.size() << " (unlocated " << fs.unlocated << "), rms " << q.rms_error << " max "
+                   << q.max_error << ", surface rms " << q.surface_rms_error << " max " << q.surface_max_error
+                   << ", distance max " << q.surface_distance_max << " mean " << q.surface_distance_mean
+                   << ", sJ min " << q.min_scaled_jacobian << " mean " << q.mean_scaled_jacobian
+                   << ", non-positive " << q.nonpositive_jacobian << " / " << q.eval_points << " ("
+                   << q.blocks_with_nonpositive << " blocks), C0 " << q.c0_max_gap << ", " << sec << " s");
+    }
 }

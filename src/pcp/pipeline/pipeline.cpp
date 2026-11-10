@@ -3,11 +3,15 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <algorithm>
 #include <string>
 
 #include <Eigen/Geometry>
 
+#include "pcp/blocks/block_layout.h"
 #include "pcp/core/constants.h"
+#include "pcp/io/gismo_xml.h"
 #include "pcp/geom/normalize.h"
 #include "pcp/io/off.h"
 #include "pcp/io/text.h"
@@ -29,7 +33,9 @@ Stage parse_stage(const std::string& s) {
   if (s == "l1") return Stage::L1;
   if (s == "structure") return Stage::Structure;
   if (s == "simplify") return Stage::Simplify;
-  throw Error("unknown stage '" + s + "' (expected validate, tet, l1, structure or simplify)");
+  if (s == "blocks") return Stage::Blocks;
+  if (s == "fit") return Stage::Fit;
+  throw Error("unknown stage '" + s + "' (expected validate, tet, l1, structure, simplify, blocks or fit)");
 }
 
 const char* stage_name(Stage s) {
@@ -38,7 +44,9 @@ const char* stage_name(Stage s) {
     case Stage::Tet: return "tet";
     case Stage::L1: return "l1";
     case Stage::Structure: return "structure";
-    default: return "simplify";
+    case Stage::Simplify: return "simplify";
+    case Stage::Blocks: return "blocks";
+    default: return "fit";
   }
 }
 
@@ -47,6 +55,7 @@ nlohmann::json PipelineParams::to_json() const {
           {"l1", l1.to_json()},
           {"final_map", final_map.to_json()},
           {"simplify", simplify.to_json()},
+          {"fit", fit.to_json()},
           {"feature_edges", feature_edges}};
 }
 
@@ -61,6 +70,8 @@ void PipelineParams::update_from_json(const nlohmann::json& j) {
       final_map.update_from_json(it.value());
     else if (k == "simplify")
       simplify.update_from_json(it.value());
+    else if (k == "fit")
+      fit.update_from_json(it.value());
     else if (k == "feature_edges")
       feature_edges = it.value().get<std::string>();
     else
@@ -287,6 +298,9 @@ nlohmann::json run_pipeline(const PipelineOptions& opt, const PipelineParams& pa
     }
 
     // -- simplify: Chen 2019 height simplification and re-mapping with the new heights
+    // Axis-aligned (normalized) polycube and patch heights used by the later stages.
+    MatX3d poly_X = fm.X;
+    std::vector<double> poly_heights = fm.heights;
     if (!params.simplify.enabled) {
       stats["simplify"] = {{"enabled", false}};
       log.info("simplify: disabled");
@@ -358,6 +372,8 @@ nlohmann::json run_pipeline(const PipelineOptions& opt, const PipelineParams& pa
           {"seconds_map", sp.map.seconds}};
       stats["simplify"] = st;
       timing["simplify"] = seconds_since(t0);
+      poly_X = sp.map.X;
+      poly_heights = sr.patch_height;
       log.info("simplify: cuts " + std::to_string(sr.cuts_total_before()) + " -> " +
                std::to_string(sr.cuts_total_after()) + " (" + std::to_string(sr.merges.size()) +
                " of " + std::to_string(sr.merges_proposed) + " merges kept, " +
@@ -376,6 +392,84 @@ nlohmann::json run_pipeline(const PipelineOptions& opt, const PipelineParams& pa
         throw Error(msg);
       }
     }
+    save_stats();
+    if (opt.until == Stage::Simplify) {
+      timing["total"] = seconds_since(t_all);
+      save_stats();
+      return stats;
+    }
+
+    // -- blocks: cut the polycube along the cut planes into cuboid blocks
+    t0 = std::chrono::steady_clock::now();
+    const auto cuts = cut_coordinates(poly_X, graph.patches.label, poly_heights);
+    const BlockLayout layout =
+        build_block_layout(poly_X, tets.B, graph.patches.face_patch, graph.patches.label, cuts);
+    const Eigen::VectorXi tet_block = assign_tets_to_blocks(layout, poly_X, tets.T);
+    write_json(out / "06_blocks.json", layout.to_json(norm.scale, norm.center));
+    write_vtu_tets(out / "06_blocks_polycube.vtu", norm.inverse(poly_X), tets.T,
+                   {CellField::integer("block", tet_block)});
+    write_vtu_tets(out / "06_blocks_input.vtu", tets.X, tets.T, {CellField::integer("block", tet_block)});
+    double tet_vol = 0.0;
+    for (Index t = 0; t < tets.T.rows(); ++t) tet_vol += tet_volume(poly_X, tets.T, t);
+    const double pdiag = (poly_X.colwise().maxCoeff() - poly_X.colwise().minCoeff()).norm();
+    double thinnest = std::numeric_limits<double>::infinity();
+    for (const Block& b : layout.blocks) thinnest = std::min(thinnest, (b.hi - b.lo).minCoeff());
+    stats["blocks"] = {{"blocks", layout.blocks.size()},
+                       {"cuts", {cuts[0].size(), cuts[1].size(), cuts[2].size()}},
+                       {"grid_cells", layout.grid_cells()},
+                       {"interior_faces", layout.interior_faces()},
+                       {"boundary_faces", layout.boundary_faces()},
+                       {"volume_rel_diff", std::abs(layout.blocks_volume() - tet_vol) / std::abs(tet_vol)},
+                       {"thinnest_block_rel", thinnest / pdiag},
+                       {"seconds", seconds_since(t0)}};
+    timing["blocks"] = seconds_since(t0);
+    log.info("blocks: " + std::to_string(layout.blocks.size()) + " blocks in a " +
+             std::to_string(layout.intervals(0)) + " x " + std::to_string(layout.intervals(1)) + " x " +
+             std::to_string(layout.intervals(2)) + " grid, " + std::to_string(layout.interior_faces()) +
+             " interior and " + std::to_string(layout.boundary_faces()) + " boundary faces");
+    save_stats();
+    if (opt.until == Stage::Blocks) {
+      timing["total"] = seconds_since(t_all);
+      save_stats();
+      return stats;
+    }
+
+    // -- fit: one trivariate B-spline volume per block, shared control points (C0)
+    t0 = std::chrono::steady_clock::now();
+    const FitParams& fp = params.fit;
+    const SplineSpace space = build_spline_space(layout, fp.degree, fp.element_size * pdiag);
+    const FitSamples samples = sample_blocks(layout, space, fp.samples_per_element, poly_X, tets.T, tets.X);
+    const double t_sample = seconds_since(t0);
+    const FitSolution sol = fit_volumes(layout, space, samples, fp.smoothing);
+    const double t_solve = seconds_since(t0) - t_sample;
+    const double in_diag = (tets.X.colwise().maxCoeff() - tets.X.colwise().minCoeff()).norm();
+    const FitQuality quality = evaluate_fit(layout, space, sol, samples, tets.X, tets.B, in_diag);
+    write_gismo_xml(out / "07_bspline.xml", gismo_topology(layout, sol.volumes));
+    const SampleMesh smesh = sample_mesh(layout, space, sol);
+    write_vtu_hexes(out / "07_bspline_samples.vtu", smesh.X, smesh.H, {CellField::integer("block", smesh.block)},
+                    {PointField::scalar("scaled_jacobian", smesh.scaled_jacobian)});
+    long long ncoefs = 0;
+    for (const TensorBSpline3& v : sol.volumes) ncoefs += static_cast<long long>(v.coefs.size());
+    nlohmann::json fj = quality.to_json();
+    fj["degree"] = fp.degree;
+    fj["control_points"] = space.n_unknowns;
+    fj["control_points_per_patch_total"] = ncoefs;
+    fj["samples"] = samples.block.size();
+    fj["unlocated_samples"] = samples.unlocated;
+    fj["seconds_sampling"] = t_sample;
+    fj["seconds_solve"] = t_solve;
+    fj["seconds"] = seconds_since(t0);
+    stats["fit"] = fj;
+    timing["fit"] = seconds_since(t0);
+    log.info("fit: " + std::to_string(space.n_unknowns) + " control points, " +
+             std::to_string(samples.block.size()) + " samples (" + std::to_string(samples.unlocated) +
+             " unlocated), error rms " + std::to_string(quality.rms_error) + " max " +
+             std::to_string(quality.max_error) + ", surface rms " + std::to_string(quality.surface_rms_error));
+    log.info("fit: scaled Jacobian min " + std::to_string(quality.min_scaled_jacobian) + " mean " +
+             std::to_string(quality.mean_scaled_jacobian) + ", non-positive " +
+             std::to_string(quality.nonpositive_jacobian) + " of " + std::to_string(quality.eval_points) +
+             " points in " + std::to_string(quality.blocks_with_nonpositive) + " blocks, C0 gap " +
+             std::to_string(quality.c0_max_gap));
   } catch (const Error& e) {
     timing["total"] = seconds_since(t_all);
     stats["error"] = e.what();

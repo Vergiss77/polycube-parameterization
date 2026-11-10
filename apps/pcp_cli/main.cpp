@@ -11,19 +11,19 @@
 #include "pcp/pipeline/pipeline.h"
 
 int main(int argc, char** argv) {
-  CLI::App app{"Polycube construction pipeline (Huang et al. 2014 l1 polycube)"};
+  CLI::App app{"Polycube-based multi-block B-spline volume parameterization (Huang 2014, Chen 2019)"};
   app.set_version_flag("--version", pcp::version());
 
-  std::string input, output, until = "simplify", resume, params_file, feature_edges,
+  std::string input, output, until = "fit", resume, params_file, feature_edges,
                              linear_solver;
   bool quiet = false, verbose = false, no_rotation = false, no_simplify = false;
   std::optional<double> beta, alpha0, alpha_factor, eps0, eps_factor, threshold, omega,
-      tet_size_factor, tet_max_volume, tet_ratio, max_stretch;
-  std::optional<int> max_stages;
+      tet_size_factor, tet_max_volume, tet_ratio, max_stretch, element_size;
+  std::optional<int> max_stages, degree;
 
   app.add_option("input", input, "Input closed triangle mesh (.off)")->required();
   app.add_option("-o,--output", output, "Output directory")->required();
-  app.add_option("--until", until, "Last stage to run: validate | tet | l1 | structure | simplify")
+  app.add_option("--until", until, "Last stage to run: validate | tet | l1 | structure | simplify | blocks | fit")
       ->capture_default_str();
   app.add_option("--resume-from", resume, "Start from a saved tet mesh (.tmsh) instead of tetrahedralizing");
   app.add_option("--params", params_file, "JSON parameter file (command-line options override it)");
@@ -43,6 +43,8 @@ int main(int argc, char** argv) {
   app.add_option("--tet-ratio", tet_ratio, "TetGen radius-edge ratio bound");
   app.add_flag("--no-simplify", no_simplify, "Skip the height simplification (Chen 2019)");
   app.add_option("--max-stretch", max_stretch, "Height simplification: maximum chain stretch ratio (>= 1)");
+  app.add_option("--degree", degree, "B-spline degree of the fitted volumes (>= 1)");
+  app.add_option("--element-size", element_size, "B-spline target element size / polycube bounding box diagonal");
   auto* q = app.add_flag("-q,--quiet", quiet, "Only print errors");
   app.add_flag("-v,--verbose", verbose, "Print detailed progress")->excludes(q);
 
@@ -69,6 +71,8 @@ int main(int argc, char** argv) {
     if (tet_ratio) params.tet.radius_edge_ratio = *tet_ratio;
     if (no_simplify) params.simplify.enabled = false;
     if (max_stretch) params.simplify.update_from_json({{"max_stretch", *max_stretch}});  // validates
+    if (degree) params.fit.update_from_json({{"degree", *degree}});                     // validates
+    if (element_size) params.fit.update_from_json({{"element_size", *element_size}});
 
     pcp::PipelineOptions opt;
     opt.input = input;

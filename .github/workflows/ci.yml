@@ -1,0 +1,56 @@
+name: CI
+
+# Every push / PR: build and unit tests on both platforms (a few minutes).
+# Model integration tests (about 1.5 h per platform) run only when triggered by hand:
+# Actions tab -> CI -> "Run workflow".
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Run the model integration tests"
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
+    env:
+      RUN_MODELS: ${{ github.event_name == 'workflow_dispatch' && inputs.models }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release -L unit --output-on-failure
+
+      - name: Integration test (I-SPAR)
+        if: env.RUN_MODELS == 'true'
+        run: ctest --test-dir build -C Release -R '^model_ispar$' --output-on-failure
+
+      - name: Integration test (CLEVIS)
+        if: env.RUN_MODELS == 'true'
+        run: ctest --test-dir build -C Release -R '^model_clevis$' --output-on-failure
+
+      - name: Integration test (TAILSITTER)
+        if: env.RUN_MODELS == 'true'
+        run: ctest --test-dir build -C Release -R '^model_tailsitter$' --output-on-failure -V
+
+      - name: Integration test (TAILSITTER, beta comparison)
+        if: env.RUN_MODELS == 'true'
+        run: ctest --test-dir build -C Release -R '^model_tailsitter_beta$' --output-on-failure -V
+
+      - name: Other model checks
+        if: env.RUN_MODELS == 'true'
+        run: ctest --test-dir build -C Release -R '^models_misc$' --output-on-failure

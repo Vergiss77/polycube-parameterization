@@ -211,6 +211,14 @@ I-SPAR 和 CLEVIS 保留的合并都是高度原本就几乎相同的面（长�
 
 左图按块着色，右图按缩放 Jacobian 着色（深色为低值）。TAILSITTER 右图中深色的竖条是台阶延伸出的薄块，非正点集中在这些位置。
 
+### 在浏览器中查看
+
+`apps/web_viewer/` 可以直接读 `07_bspline.xml`，交互查看块划分、缩放 Jacobian、内部接口面、剖切和控制网，也可以并排对比两个结果。用法见 README。在开发机上加载 TAILSITTER（462 块）总共约 0.2 s：读取约 50 ms，解析约 10 ms，Jacobian 统计约 40 ms，离散约 90 ms。
+
+![查看器：CLEVIS 按块着色](images/viewer_clevis.png)
+![查看器：TAILSITTER 按缩放 Jacobian 着色，红点为 29 个非正点](images/viewer_tailsitter.png)
+![查看器：CLEVIS 单元尺寸 0.05 与 0.025 并排对比](images/viewer_compare.png)
+
 ## 结果预览
 
 图中颜色表示每个面的主轴方向：红 ±X，绿 ±Y，蓝 ±Z，深色为负方向。黄色表示没有对齐到任何轴的面，三张图里都没有。

@@ -2,6 +2,8 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <set>
 
 #include <Eigen/Geometry>
@@ -314,4 +316,36 @@ TEST_CASE("sampled volume mesh: hexahedra per block, fields written") {
   CHECK(xml.find("Name=\"scaled_jacobian\"") != std::string::npos);
   CHECK(xml.find("Name=\"block\"") != std::string::npos);
   CHECK_THROWS_AS(write_vtu_hexes(path, M.X, M.H, {}, {PointField::scalar("bad", Eigen::VectorXd::Zero(3))}), Error);
+}
+
+// Writes a small multipatch (U-shaped polycube, bent target) for the web viewer's Node tests
+// (design D10 of add-web-spline-viewer) into $PCP_WEB_FIXTURE_DIR when it is set.
+TEST_CASE("web viewer fixture: U shape multipatch, samples and Jacobian statistics") {
+  Affine a = make_affine(kU);
+  MatX3d Y = a.t.X;
+  for (Index i = 0; i < Y.rows(); ++i) {  // smooth non-affine bend
+    const double x = a.t.X(i, 0), y = a.t.X(i, 1), z = a.t.X(i, 2);
+    Y.row(i) << x + 0.15 * std::sin(1.3 * z), y + 0.1 * x * z, z + 0.08 * x * x;
+  }
+  SplineSpace S = build_spline_space(a.L, 3, 0.5);
+  FitSamples fs = sample_blocks(a.L, S, 3, a.t.X, a.t.T, Y);
+  FitSolution sol = fit_volumes(a.L, S, fs, 1e-6);
+  const double diag = (Y.colwise().maxCoeff() - Y.colwise().minCoeff()).norm();
+  FitQuality q = evaluate_fit(a.L, S, sol, fs, Y, a.t.B, diag);
+  CHECK(q.c0_max_gap <= 1e-12);
+  CHECK(q.max_error < 0.05);
+  const char* dir = std::getenv("PCP_WEB_FIXTURE_DIR");
+  if (!dir) return;
+  const std::filesystem::path out(dir);
+  std::filesystem::create_directories(out);
+  write_gismo_xml(out / "07_bspline.xml", gismo_topology(a.L, sol.volumes));
+  SampleMesh M = sample_mesh(a.L, S, sol);
+  write_vtu_hexes(out / "07_bspline_samples.vtu", M.X, M.H, {CellField::integer("block", M.block)},
+                  {PointField::scalar("scaled_jacobian", M.scaled_jacobian)});
+  nlohmann::json j = q.to_json();
+  j["blocks"] = a.L.blocks.size();
+  j["interior_faces"] = a.L.interior_faces();
+  j["boundary_faces"] = a.L.boundary_faces();
+  j["control_points"] = S.n_unknowns;
+  text::write_file(out / "fit_stats.json", j.dump(2));
 }

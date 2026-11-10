@@ -13,3 +13,18 @@ foreach(name ispar clevis tailsitter tailsitter_beta)
 endforeach()
 add_test(NAME models_misc COMMAND pcp_tests -ts=models -tce=model_*)
 set_tests_properties(models_misc PROPERTIES LABELS models)
+
+# Web viewer (apps/web_viewer): Node tests of the JavaScript parser / evaluator against a small
+# multipatch written by the C++ code (fixture). Skipped when Node is not installed.
+set(PCP_WEB_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/web_fixture)
+add_test(NAME web_fixture COMMAND pcp_tests "-tc=web viewer fixture*")
+set_tests_properties(web_fixture PROPERTIES LABELS unit FIXTURES_SETUP web
+                     ENVIRONMENT "PCP_WEB_FIXTURE_DIR=${PCP_WEB_FIXTURE_DIR}")
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+  add_test(NAME web_viewer_js COMMAND ${NODE_EXECUTABLE} --test "${PROJECT_SOURCE_DIR}/tests/web/*.test.mjs")
+  set_tests_properties(web_viewer_js PROPERTIES LABELS unit FIXTURES_REQUIRED web
+                       ENVIRONMENT "PCP_WEB_FIXTURE_DIR=${PCP_WEB_FIXTURE_DIR}")
+else()
+  message(STATUS "node not found: the web viewer tests (web_viewer_js) are skipped")
+endif()

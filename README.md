@@ -35,7 +35,7 @@ cmake --build build --config Release --parallel
 ## 测试
 
 ```sh
-ctest --test-dir build -C Release -L unit --output-on-failure   # 单元测试，约 15 秒
+ctest --test-dir build -C Release -L unit --output-on-failure   # 单元测试（含 Web 查看器的 Node 测试），约 15 秒
 ctest --test-dir build -C Release -L models --output-on-failure # 三个模型的集成测试，较慢
 ```
 
@@ -102,6 +102,44 @@ build/apps/pcp_cli/pcp_cli models/CLEVIS-D64EEBFA.off -o out/clevis
 4. 打开 `05_polycube_simplified.vtu` 与 `04_polycube.vtu` 对比，查看高度简化把哪些面对齐到了同一平面。
 5. 打开 `06_blocks_input.vtu`，着色选 `block`，查看分块落在原模型上的位置；`06_blocks_polycube.vtu` 是同样的分块在 polycube 上的样子。
 6. 打开 `07_bspline_samples.vtu`，着色选 `scaled_jacobian`（点数据）查看样条体质量；用 `Threshold`（`scaled_jacobian` ≤ 0）找出 Jacobian 非正的位置。
+
+## 在浏览器中查看样条
+
+`apps/web_viewer/` 是一个不需要构建、可以离线使用的 Web 查看器。它在浏览器里直接读取 `07_bspline.xml`，用 JavaScript 求值 B 样条，结果和 C++ 一致：位置误差 ≤ 1e-12 × 对角线，Jacobian 统计逐项相同。
+
+启动：在仓库根目录起一个静态服务，再用浏览器打开页面。
+
+```sh
+python3 -m http.server 8765
+# 浏览器打开 http://localhost:8765/apps/web_viewer/
+```
+
+端口被占用时换一个即可（例如 `python3 -m http.server 9876`），地址中的端口号随之修改。页面不能直接从 `file://` 打开，因为浏览器不允许从本地文件加载 ES 模块。
+
+加载文件有三种方式：
+- 用工具栏的"文件 A / 文件 B"选择文件；
+- 把文件拖到视图里；
+- 用地址参数（路径相对于页面），例如：
+  - `http://localhost:8765/apps/web_viewer/?a=../../out/clevis/07_bspline.xml`
+  - `...?a=../../out/clevis/07_bspline.xml&b=../../out/clevis_h0025/07_bspline.xml`：左右并排对比两个结果
+
+功能：
+
+| 控件 | 作用 |
+|---|---|
+| 细分 | 每个单元每个方向的细分数（1–32） |
+| 单元线 / 细分线 | 显示样条的单元划分，或全部离散网格线 |
+| 着色 | 按块（相邻块颜色不同）、缩放 Jacobian（viridis 色标，≤ 0 为红色）、纯色 |
+| 非正点 | 标出评估网格上缩放 Jacobian ≤ 0 的点，包括体内部的点，与 `stats.json` 中 `fit.nonpositive_jacobian` 一致 |
+| 接口面 | 半透明显示块与块之间的内部接口面 |
+| 剖切 | 沿 x/y/z 剖切，滑块调位置，"翻转"切换保留的一侧 |
+| 控制网 | 显示选中块或全部块的控制点与控制网 |
+| 点击模型 | 选中一个块，信息面板显示块编号、单元数、控制点数和该块的 Jacobian |
+| 相机同步 / 重置视角 | 两个视图同步旋转缩放；恢复默认视角 |
+
+左上角的信息面板显示块数、接口数、控制点数（去重后与 `stats.json` 中 `fit.control_points` 一致）、Jacobian 统计以及各步耗时。
+
+three.js 0.170.0（MIT）放在 `apps/web_viewer/vendor/three/`，版本和校验和见其中的 `VERSION`。计算部分的模块（`gismo.js`、`bspline.js`、`quality.js`、`tessellate.js`、`controlnet.js`、`colors.js`）不依赖浏览器，Node 测试在 `tests/web/`，通过 ctest 的 `unit` 标签运行（需要安装 Node，没有时自动跳过）。
 
 ## 用 G+Smo 读取样条体
 

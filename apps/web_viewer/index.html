@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B 样条多片体查看器</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.min.js",
+        "three/addons/": "./vendor/three/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header id="toolbar">
+    <span class="title">B 样条多片体查看器</span>
+
+    <fieldset>
+      <legend>文件</legend>
+      <label class="file">A <input type="file" id="file-a" accept=".xml"></label>
+      <label class="file">B <input type="file" id="file-b" accept=".xml"></label>
+      <button id="clear-b" title="关闭右侧视图">关闭 B</button>
+    </fieldset>
+
+    <fieldset>
+      <legend>离散</legend>
+      <label>细分 <input type="range" id="subdiv" min="1" max="32" value="8"> <output id="subdiv-out">8</output></label>
+      <label><input type="checkbox" id="lines-elements" checked> 单元线</label>
+      <label><input type="checkbox" id="lines-all"> 细分线</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>着色</legend>
+      <select id="color-mode">
+        <option value="block">按块</option>
+        <option value="jacobian">缩放 Jacobian</option>
+        <option value="plain">纯色</option>
+      </select>
+      <label><input type="checkbox" id="markers" checked> 非正点</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>内部</legend>
+      <label><input type="checkbox" id="interfaces"> 接口面</label>
+      <select id="clip-axis">
+        <option value="none">不剖切</option>
+        <option value="0">剖切 x</option>
+        <option value="1">剖切 y</option>
+        <option value="2">剖切 z</option>
+      </select>
+      <input type="range" id="clip-pos" min="0" max="1000" value="500" disabled>
+      <label><input type="checkbox" id="clip-flip" disabled> 翻转</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>控制网</legend>
+      <select id="net-mode">
+        <option value="none">不显示</option>
+        <option value="selected">选中块</option>
+        <option value="all">全部块</option>
+      </select>
+    </fieldset>
+
+    <fieldset>
+      <legend>视图</legend>
+      <label><input type="checkbox" id="sync" checked> 相机同步</label>
+      <button id="reset-view">重置视角</button>
+    </fieldset>
+  </header>
+
+  <main id="views">
+    <section class="pane" id="pane-a">
+      <div class="canvas-host"></div>
+      <div class="info"></div>
+      <div class="legend" hidden></div>
+      <div class="drop-hint">把 07_bspline.xml 拖到这里，或用上方的"文件 A"打开</div>
+    </section>
+    <section class="pane" id="pane-b" hidden>
+      <div class="canvas-host"></div>
+      <div class="info"></div>
+      <div class="legend" hidden></div>
+      <div class="drop-hint">把第二个 07_bspline.xml 拖到这里，或用上方的"文件 B"打开</div>
+    </section>
+  </main>
+
+  <div id="error" hidden></div>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
